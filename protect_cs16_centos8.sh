@@ -124,6 +124,19 @@ iptables -A INPUT -p udp --dport 27010:27999 \
 --hashlimit-mode srcip --hashlimit-name cs_udp_limit \
 -j ACCEPT
 
+# Source Engine Query
+iptables -I INPUT 1 -p udp --dport 27010:27999 \
+-m string --string "Source Engine Query" --algo bm \
+-m hashlimit --hashlimit 15/sec --hashlimit-burst 40 \
+--hashlimit-mode srcip --hashlimit-name a2s_query \
+-j ACCEPT
+
+iptables -I INPUT 2 -p udp --dport 27010:27999 \
+-m string --string "Source Engine Query" --algo bm \
+-m hashlimit --hashlimit 30/sec --hashlimit-burst 60 \
+--hashlimit-mode srcip --hashlimit-name a2s_abuse \
+-j SET --add-set autoban src
+
 # Tudo que sobrar = autoban
 iptables -A INPUT -p udp --dport 27010:27999 \
 -j SET --add-set autoban src
