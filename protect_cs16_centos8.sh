@@ -1,86 +1,145 @@
 #!/bin/bash
 
 echo "=== Instalando dependências ==="
-dnf install -y iptables-services ipset tcpdump
+dnf install iptables-services ipset tcpdump -y
 
+echo "=== Desativando firewalld ==="
 systemctl stop firewalld
 systemctl disable firewalld
 
+echo "=== Ativando iptables ==="
 systemctl enable iptables
 systemctl start iptables
 
+echo "=== Limpando regras ==="
 iptables -F
 iptables -X
 iptables -Z
 
+# =========================
 # IPSET
+# =========================
 
 ipset destroy autoban 2>/dev/null
-ipset create autoban hash:ip timeout 600 -exist
-
 ipset destroy whitelist 2>/dev/null
-ipset create whitelist hash:ip -exist
 
-ipset add whitelist 177.54.151.114 -exist
-ipset add whitelist 177.54.151.234 -exist
+ipset create autoban hash:ip timeout 3600
+ipset create whitelist hash:ip
 
+# SUA WHITELIST
+ipset add whitelist 177.54.151.114
+ipset add whitelist 177.54.151.234
+
+# =========================
 # BASE
-
-iptables -A INPUT -i lo -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
-iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
-
-iptables -A INPUT -m set --match-set whitelist src -j ACCEPT
-iptables -A INPUT -m set --match-set autoban src -j DROP
-
-# ICMP
-
-iptables -A INPUT -p icmp --icmp-type echo-request -j ACCEPT
-
-# CS UDP SMALL PACKETS
-
-iptables -A INPUT -p udp --dport 27010:27999 -m length --length 0:12 -m hashlimit --hashlimit 80/sec --hashlimit-burst 160 --hashlimit-mode srcip --hashlimit-name len_small -j ACCEPT
-iptables -A INPUT -p udp --dport 27010:27999 -m length --length 0:12 -j SET --add-set autoban src
-
-# CS UDP LEN 23
-
-iptables -A INPUT -p udp --dport 27010:27999 -m length --length 23 -m hashlimit --hashlimit 120/sec --hashlimit-burst 250 --hashlimit-mode srcip --hashlimit-name len23 -j ACCEPT
-iptables -A INPUT -p udp --dport 27010:27999 -m length --length 23 -j SET --add-set autoban src
-
-# GETCHALLENGE
-
-iptables -A INPUT -p udp --dport 27010:27999 -m string --string "getchallenge" --algo bm -m hashlimit --hashlimit 80/sec --hashlimit-burst 160 --hashlimit-mode srcip --hashlimit-name challenge -j ACCEPT
-iptables -A INPUT -p udp --dport 27010:27999 -m string --string "getchallenge" --algo bm -j SET --add-set autoban src
-
-# FLOOD UDP
-
-iptables -A INPUT -p udp --dport 27010:27999 -m hashlimit --hashlimit 250/sec --hashlimit-burst 500 --hashlimit-mode srcip --hashlimit-name udp_flood -j ACCEPT
-iptables -A INPUT -p udp --dport 27010:27999 -j SET --add-set autoban src
-
-# PORTAS TCP
-
-for port in 22 2222 21 2121 80 443 8080 8888 3306 12679 38151; do
-iptables -A INPUT -p tcp --dport $port -j ACCEPT
-done
-
-iptables -A INPUT -p tcp --dport 40110:40210 -j ACCEPT
-
-# DNS SAÍDA
-
-iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
-iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
-
-# CS FINAL
-
-iptables -A INPUT -p udp --dport 27010:27999 -j ACCEPT
+# =========================
 
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT ACCEPT
 
+# Loopback
+iptables -A INPUT -i lo -j ACCEPT
+
+# Established
+iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+
+# Invalid
+iptables -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# Whitelist sempre primeiro
+iptables -I INPUT 1 -m set --match-set whitelist src -j ACCEPT
+
+# Autoban
+iptables -I INPUT 2 -m set --match-set autoban src -j DROP
+
+# =========================
+# ANTI-SPOOF
+# =========================
+
+iptables -A INPUT -s 0.0.0.0/8 -j DROP
+iptables -A INPUT -s 10.0.0.0/8 -j DROP
+iptables -A INPUT -s 100.64.0.0/10 -j DROP
+iptables -A INPUT -s 127.0.0.0/8 -j DROP
+iptables -A INPUT -s 169.254.0.0/16 -j DROP
+iptables -A INPUT -s 172.16.0.0/12 -j DROP
+iptables -A INPUT -s 192.168.0.0/16 -j DROP
+iptables -A INPUT -s 224.0.0.0/4 -j DROP
+iptables -A INPUT -s 240.0.0.0/4 -j DROP
+
+# Fragmentados
+iptables -A INPUT -f -j DROP
+
+# =========================
+# ICMP
+# =========================
+
+iptables -A INPUT -p icmp --icmp-type echo-request -m limit --limit 5/sec -j ACCEPT
+
+# =========================
+# TCP LIBERADO
+# =========================
+
+for port in 22 2222 21 2121 80 443 8080 8888 3306 12679 38151; do
+    iptables -A INPUT -p tcp --dport $port -j ACCEPT
+done
+
+iptables -A INPUT -p tcp --dport 40110:40210 -j ACCEPT
+
+# =========================
+# CS 1.6 HARDCORE
+# =========================
+
+# Pacotes pequenos (ataque comum)
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m length --length 0:32 \
+-j SET --add-set autoban src
+
+# Pacotes enormes suspeitos
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m length --length 600:65535 \
+-j SET --add-set autoban src
+
+# getchallenge flood
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m string --string "getchallenge" --algo bm \
+-m hashlimit --hashlimit 8/sec --hashlimit-burst 16 \
+--hashlimit-mode srcip --hashlimit-name getchallenge_limit \
+-j ACCEPT
+
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m string --string "getchallenge" --algo bm \
+-j SET --add-set autoban src
+
+# A2S_INFO flood (pacote clássico)
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m length --length 33:80 \
+-m hashlimit --hashlimit 15/sec --hashlimit-burst 30 \
+--hashlimit-mode srcip --hashlimit-name a2s_limit \
+-j ACCEPT
+
+# Flood UDP geral
+iptables -A INPUT -p udp --dport 27010:27999 \
+-m hashlimit --hashlimit 20/sec --hashlimit-burst 40 \
+--hashlimit-mode srcip --hashlimit-name cs_udp_limit \
+-j ACCEPT
+
+# Tudo que sobrar = autoban
+iptables -A INPUT -p udp --dport 27010:27999 \
+-j SET --add-set autoban src
+
+iptables -A INPUT -p udp --dport 27010:27999 -j DROP
+
+# =========================
+# SAVE
+# =========================
+
 service iptables save
 
-echo "================================="
-echo "Proteção CS 1.6 ativa"
-echo "Autoban: 600 segundos"
-echo "================================="
+echo "========================================"
+echo "CS 1.6 HARDCORE PROTECTION ATIVA"
+echo "Autoban: 3600s"
+echo "Whitelist ativa"
+echo "Anti-spoof ativo"
+echo "Fragment drop ativo"
+echo "========================================"
